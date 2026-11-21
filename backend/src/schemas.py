@@ -21,3 +21,5 @@ class InspectionIn(BaseModel):
     evidence_complete:bool
 class DecisionIn(BaseModel):
     decision:Literal['paid','denied']
+class UnfreezeIn(BaseModel):
+    note:str=Field(min_length=8,max_length=500)

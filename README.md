@@ -48,7 +48,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 |后端|Python3.12、FastAPI、SQLAlchemy2、PyMySQL|
 |算法|scikit-learn1.6、NumPy；真实worker训练|
 |持久化|MySQL8，外键、唯一键、范围约束|
-|队列|Redis7 list；共享 artifacts 卷保存模型指标与心跳|
+|队列|Redis7 list（claim-risk 分流、model-health-eval 健康评估）；共享 artifacts 卷保存模型指标与心跳|
 |安全横切|JWT8小时、角色校验、PBKDF2口令、审计、请求追踪、全局错误恢复|
 
 `backend/src/models.py` 领域实体；`schemas.py` 请求约束；`claim_service.py` 状态与关联规则；`risk_model.py` 算法；`worker.py` 队列；`main.py` 路由；`middlewares.py` 请求追踪和错误恢复。`backend/scripts/seed_demo.py` 仅插入自然键缺失的演示记录，不覆盖修改。`frontend/src/pages/` 九业务页；`components/common.js` 共享导航、状态、标题和通知；`utils/api.js` API/会话/页面状态；`utils/format.js` 转义和格式化。
@@ -94,6 +94,21 @@ Seed 另有 `CL-RETURN-DEMO`（已赔付、可发件）和 `CL-SETTLE-DEMO`（�
 seed新增BAY-HYD(8h/日)、BAY-QUICK(4h/日)、BAY-OFF停用，以及hydraulic20/engine5/transmission3件备件。可用CL-RETURN-DEMO或CL-SETTLE-DEMO已赔付索赔演练预约→匹配领料→开工→完工→质量回访；异常再安排同索赔新预约返工后主管关闭。自然键只补缺失，重复seed不改已扣库存、维修实耗、工位容量、回访与原结算。新增5张表，不给原历史表加列，也不回填改变旧签结。
 
 当前范围：预约为按日工时额度，无具体起止时刻、跨工位调度或取消；完工超时只留主管依据，不重分配其他预约。工位停用只阻止新预约，已确认维修仍可履约；无工资、采购补货、拆单部分退料、仓库扫码或真实售后联系。回访是人工登记，不外发消息；异常关闭证明同索赔返工完工，不替代另一轮质量验收或重开原赔款。新增证据见 `test-artifacts/gb-1022/v3/`。
+
+## 模型健康与版本冻结（第四轮扩展）
+
+上线后分流模型可能因近期故障变化而失真。`health_models.py` 新增四张表：ModelVersion（版本，active_flag 部分唯一保证全局仅一个活跃版本）、HealthWindow（按版本锁定的评估窗口）、HealthSample（入窗样本，claim_id 唯一保证一条结案索赔只进一个窗口、只保留一套结果）、ClaimRoute（受理时分流记录，不给原索赔表加列）。
+
+10. 模型健康评估：风险页顶部按模型版本锁定评估窗口，只纳入标签齐全（已结案、争议标签与评分齐全、受理时按模型路由）的结案索赔，按故障部位显示样本量、平均预测、实际争议率与校准误差。评估经 Redis 队列由 worker 分批采集（每批独立提交），中断后重跑从断点恢复，唯一键保证不重复计数。任一部位样本不足 8 条或校准误差超过 0.2 即自动冻结版本并锁定窗口，新受理索赔转 `manual_review` 人工通道，直接进拆检裁决、无模型评分；误差 ≥0.15 显示接近超限预警。
+11. 版本切换：受理、冻结、解冻共用版本行锁（SELECT ... FOR UPDATE），冻结与受理同时发生时原子切换——索赔要么赶上活跃版本评分，要么转人工，不会两半。排队索赔沿用受理时版本评分（ClaimRoute 在受理时固化）；窗口锁定后才结案的迟到标签统一并入下一版本窗口，不会丢失。解冻仅主管可操作，须填写至少 8 字说明，提交后旧版本退役、生成新版本并开启新窗口；旧评分、窗口快照与已签结论全部保留不改。
+
+|接口|权限/动作|
+|---|---|
+|GET /model-health|三角色读取版本、窗口与分部位校准指标|
+|POST /model-health/evaluate|admin/assessor 触发健康评估（入队 worker）|
+|POST /model-health/unfreeze|admin 填写说明解冻，生成新版本|
+
+seed 初始化 v1 活跃版本，为 CL-26017/CL-HIGH 等待分流索赔补录受理路由，并生成 30 条已结案已评分索赔（CL-W-001~030，液压/发动机/传动各 10 条）作为首窗样本；首次启动即完成首轮评估（液压、发动机正常，传动 0.185 接近超限预警）。重复 seed 不重复建版本、不重复入窗。演示冻结：将若干低评分高争议结案索赔入库后再点"运行健康评估"，超限即冻结，新索赔转人工；主管说明后解冻生成 v2。
 
 ## 已知范围
 

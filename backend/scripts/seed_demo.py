@@ -1,4 +1,5 @@
-import random, json
+import random, json, logging
+from datetime import datetime,timezone
 from sqlalchemy import select,func
 from src.database import Base,engine,Session
 from src.models import User,Machine,Claim,Inspection
@@ -8,6 +9,7 @@ from src.settlement_models import Settlement
 from src.repair_models import RepairBay,RepairAppointment
 from src.spare_models import SpareStock,PartIssue
 from src.followup_models import RepairFollowup
+from src.health_models import ModelVersion,HealthWindow,HealthSample,ClaimRoute
 
 def seed():
     Base.metadata.create_all(engine)
@@ -42,6 +44,31 @@ def seed():
             if not s.scalar(select(RepairBay).where(RepairBay.code==code)):s.add(RepairBay(code=code,daily_hours=cap,active=active))
         for code,part,qty in [('SP-HYD-01','hydraulic',20),('SP-ENG-01','engine',5),('SP-TRANS-01','transmission',3)]:
             if not s.scalar(select(SpareStock).where(SpareStock.code==code)):s.add(SpareStock(code=code,part=part,available_qty=qty))
+    with Session.begin() as s:
+        machines=s.scalars(select(Machine).order_by(Machine.id)).all()
+        stamp=datetime.now(timezone.utc).isoformat()
+        v=s.scalar(select(ModelVersion).where(ModelVersion.version_no==1))
+        if not v:
+            v=ModelVersion(version_no=1,state='active',active_flag=1,created_by='seed@gengchuan.local',created_at=stamp);s.add(v);s.flush()
+            s.add(HealthWindow(version_id=v.id,state='open'))
+        for code in ['CL-26017','CL-HIGH','CL-RETURN-DEMO','CL-SETTLE-DEMO']:
+            c=s.scalar(select(Claim).where(Claim.code==code))
+            if c and not s.scalar(select(ClaimRoute).where(ClaimRoute.claim_id==c.id)):
+                s.add(ClaimRoute(claim_id=c.id,version_id=v.id,mode='model',created_at=stamp))
+        i=0
+        for part,(risks,disputed_n) in {'hydraulic':([.42,.48,.5,.55,.58,.6,.62,.65,.7,.75],6),'engine':([.15,.2,.22,.25,.28,.3,.32,.35,.38,.4],3),'transmission':([.3,.32,.35,.38,.4,.42,.45,.48,.5,.55],6)}.items():
+            for j,risk in enumerate(risks):
+                i+=1;code=f'CL-W-{i:03}'
+                c=s.scalar(select(Claim).where(Claim.code==code))
+                if not c:
+                    disputed=int(j>=len(risks)-disputed_n)
+                    c=Claim(code=code,machine_id=machines[i%2].id,part=part,hours_at_failure=int(300+risk*1500),age_days=int(100+risk*600),leak_flag=risk>=.5,risk=risk,status='denied' if disputed else 'paid',historical=False,disputed=disputed,assessment_note='模型健康窗口样本 / 模拟评分结案');s.add(c);s.flush()
+                if not s.scalar(select(ClaimRoute).where(ClaimRoute.claim_id==c.id)):
+                    s.add(ClaimRoute(claim_id=c.id,version_id=v.id,mode='model',created_at=stamp))
+    try:
+        from src.health_service import run_evaluation,pending_exists
+        if pending_exists():run_evaluation(actor='seed@gengchuan.local')
+    except Exception:logging.exception('health window evaluation failed')
     with Session() as s:
-        print(json.dumps({k:s.scalar(select(func.count()).select_from(v)) for k,v in [('users',User),('machines',Machine),('claims',Claim),('inspections',Inspection),('part_returns',PartReturn),('settlements',Settlement),('repair_bays',RepairBay),('repair_appointments',RepairAppointment),('spare_stocks',SpareStock),('part_issues',PartIssue),('repair_followups',RepairFollowup)]}))
+        print(json.dumps({k:s.scalar(select(func.count()).select_from(v)) for k,v in [('users',User),('machines',Machine),('claims',Claim),('inspections',Inspection),('part_returns',PartReturn),('settlements',Settlement),('repair_bays',RepairBay),('repair_appointments',RepairAppointment),('spare_stocks',SpareStock),('part_issues',PartIssue),('repair_followups',RepairFollowup),('model_versions',ModelVersion),('health_windows',HealthWindow),('health_samples',HealthSample),('claim_routes',ClaimRoute)]}))
 if __name__=='__main__':seed()
